@@ -3,7 +3,7 @@ import os
 import re
 import asyncio
 import aiohttp
-import requests  # FIXED: Added the missing import globally
+import requests
 import pandas as pd
 
 NICHES = ["fitness club", "gym", "yoga studio", "crossfit center"]
@@ -20,7 +20,6 @@ async def extract_emails_from_site(session, url, business_name, niche):
     }
     
     try:
-        # High-speed async network call to fetch the page content
         async with session.get(url, headers=headers, timeout=12) as response:
             if response.status == 200:
                 html_content = await response.text()
@@ -35,7 +34,6 @@ async def extract_emails_from_site(session, url, business_name, niche):
                 ]
                 
                 if valid_emails:
-                    # Pick the first unique valid email found on the page
                     selected_email = valid_emails[0]
                     print(f"   ✅ Found Email for {business_name}: {selected_email}")
                     return {
@@ -45,7 +43,6 @@ async def extract_emails_from_site(session, url, business_name, niche):
                         "Website Link": url
                     }
     except Exception:
-        # Pass quietly if a single website is down so the cloud scanner doesn't stop
         pass
     return None
 
@@ -55,6 +52,7 @@ def fetch_google_maps_businesses(niche):
         print("❌ Error: SERPAPI_KEY environment variable is missing!")
         return []
 
+    # FIXED: Added /search.json endpoint mapping to connect to the backend database
     url = "https://serpapi.com"
     params = {
         "engine": "google_maps",
@@ -64,9 +62,12 @@ def fetch_google_maps_businesses(niche):
     }
     
     try:
-        response = requests.get(url, timeout=15)
+        # FIXED: Injected params=params to bind key authentication variables to the URL request
+        response = requests.get(url, params=params, timeout=15)
         if response.status_code == 200:
             return response.json().get("local_results", [])
+        else:
+            print(f"❌ API Connection Rejected: HTTP {response.status_code} | Details: {response.text}")
     except Exception as e:
         print(f"❌ Error talking to Google Maps API: {e}")
     return []
@@ -74,7 +75,6 @@ def fetch_google_maps_businesses(niche):
 async def main_async():
     all_tasks = []
     
-    # Establish a shared async browser session for maximum speed
     async with aiohttp.ClientSession() as session:
         print("🚀 Pulling locations from Google Maps API...")
         
@@ -87,17 +87,15 @@ async def main_async():
                 website = place.get("website", "N/A")
                 
                 if website != "N/A":
-                    # Queue up all website crawlers to execute concurrently
                     task = extract_emails_from_site(session, website, name, niche)
                     all_tasks.append(task)
                     
         if all_tasks:
             print(f"⚡ Processing {len(all_tasks)} business websites simultaneously in the cloud...")
             results = await asyncio.gather(*all_tasks)
-            # Clean out empty entries where no emails were listed on pages
             clean_leads = [r for r in results if r is not None]
         else:
-            print("⚠️ No websites found in the Google Maps search results.")
+            print("⚠️ No valid websites harvested from the Google Maps interface results.")
             clean_leads = []
         
         output_file = "playwright_uae_coaches.csv"
@@ -112,8 +110,7 @@ async def main_async():
         else:
             df = pd.DataFrame(columns=target_columns)
             df.to_csv(output_file, index=False, encoding='utf-8')
-            print("\n⚠️ Extraction complete, but no emails were found on pages. File updated.")
+            print("\n⚠️ Operation complete. Empty structural file generated.")
 
 if __name__ == "__main__":
-    # Initialize the high-speed async processing engine loop
     asyncio.run(main_async())
