@@ -19,7 +19,8 @@ jobs:
     - name: Install System Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests pandas
+        # Added aiohttp for lightning fast asynchronous website crawling
+        pip install requests pandas aiohttp
 
     - name: Run Cloud Scraper Script
       env:
