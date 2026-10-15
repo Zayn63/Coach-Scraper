@@ -1,52 +1,57 @@
 # Save this file as: scraper.py
 import os
 import re
-import time
-import requests
+import asyncio
+import aiohttp
 import pandas as pd
 
-NICHES = ["fitness club", "gym", "yoga studio"]
+NICHES = ["fitness club", "gym", "yoga studio", "crossfit center"]
 REGION = "Dubai UAE"
 API_KEY = os.getenv("SERPAPI_KEY")
 
-def find_email_via_api(business_name):
-    """Asks SerpApi to find the email via quick Google snippets without opening the website."""
-    # Custom query forcing Google to show us the business's public Gmail
-    search_query = f'"{business_name}" {REGION} "gmail.com"'
-    
-    url = "https://serpapi.com"
-    params = {
-        "q": search_query,
-        "api_key": API_KEY,
-        "num": 5 # We only need the top few results to check text snippets
+async def extract_emails_from_site(session, url, business_name, niche):
+    """Visits a website, downloads its code instantly, and scans for public emails."""
+    if not url or url == "N/A" or not url.startswith("http"):
+        return None
+        
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
     
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get("organic_results", [])
-            
-            for result in results:
-                title = result.get("title", "")
-                snippet = result.get("snippet", "")
+        # High speed async network call to fetch the page content
+        async with session.get(url, headers=headers, timeout=12) as response:
+            if response.status == 200:
+                html_content = await response.text()
                 
-                # Instantly scan the text returned by the API
-                text_to_scan = f"{title} {snippet}"
-                emails = re.findall(r'[a-zA-Z0-9._%+-]+@gmail\.com', text_to_scan, re.IGNORECASE)
-                if emails:
-                    return list(set(emails))[0].lower() # Return the first found email
-    except Exception as e:
-        print(f"   ⚠️ API Search failed for {business_name}: {e}")
-        
-    return "N/A"
+                # Regex search matching clean public email records anywhere in the website code
+                emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}', html_content)
+                
+                # Filter to isolate general inquiries and personal addresses, removing image/web design noise
+                valid_emails = [
+                    e.lower() for e in set(emails) 
+                    if not any(ext in e.lower() for ext in ['.png', '.jpg', '.jpeg', '.webp', 'wix', 'domain', 'example'])
+                ]
+                
+                if valid_emails:
+                    print(f"✅ Found Email for {business_name}: {valid_emails[0]}")
+                    return {
+                        "Coach Name": business_name,
+                        "Niche": niche,
+                        "Email Address": valid_emails[0],
+                        "Website Link": url
+                    }
+    except Exception:
+        # Pass quietly if a website is broken or down so the cloud scanner doesn't halt
+        pass
+    return None
 
-def scrape_leads(niche):
+def fetch_google_maps_businesses(niche):
+    """Queries the Google Maps database to fetch target business websites."""
     if not API_KEY:
         print("❌ Error: SERPAPI_KEY environment variable is missing!")
         return []
 
-    # Step 1: Get the businesses from Google Maps via API
     url = "https://serpapi.com"
     params = {
         "engine": "google_maps",
@@ -55,56 +60,57 @@ def scrape_leads(niche):
         "api_key": API_KEY
     }
     
-    leads = []
     try:
         response = requests.get(url, timeout=15)
         if response.status_code == 200:
-            data = response.json()
-            results = data.get("local_results", [])
-            
-            for result in results:
-                title = result.get("title", "")
-                print(f"📍 Maps Found: {title}")
-                
-                # Step 2: Use Google Search API to find the email instantly
-                email = find_email_via_api(title)
-                
-                if email != "N/A":
-                    leads.append({
-                        "Coach Name": title,
-                        "Niche": niche,
-                        "Email Address": email
-                    })
-                    print(f"  ✅ Email Found via API: {email}")
-                
-                time.sleep(1) # Small delay to respect API limits
+            return response.json().get("local_results", [])
     except Exception as e:
-        print(f"❌ Error fetching Maps data: {e}")
-        
-    return leads
+        print(f"❌ Error talking to Google Maps API: {e}")
+    return []
 
-def main():
-    all_leads = []
-    print("🚀 Starting Ultra-Fast API-Only Lead Scraper...")
+async def main_async():
+    import requests
+    all_tasks = []
     
-    for niche in NICHES:
-        print(f"\n🔍 Querying: {niche}...")
-        niche_leads = scrape_leads(niche)
-        all_leads.extend(niche_leads)
+    # Establish a shared async browser session for maximum speed
+    async with aiohttp.ClientSession() as session:
+        print("🚀 Pulling locations from Google Maps API...")
         
-    output_file = "playwright_uae_coaches.csv"
-    target_columns = ["Coach Name", "Niche", "Email Address"]
-    
-    if all_leads:
-        df = pd.DataFrame(all_leads)
-        df = df.drop_duplicates(subset=["Email Address"])
-        df = df[target_columns]
-        df.to_csv(output_file, index=False, encoding='utf-8')
-        print(f"\n🎉 Done! Saved {len(df)} leads.")
-    else:
-        df = pd.DataFrame(columns=target_columns)
-        df.to_csv(output_file, index=False, encoding='utf-8')
-        print("\n⚠️ No emails found. Empty placeholder created.")
+        for niche in NICHES:
+            print(f"🗺️ Querying Maps list for: {niche}")
+            # Import requests strictly inside the helper to fetch maps data
+            import requests
+            places = fetch_google_maps_businesses(niche)
+            
+            for place in places:
+                name = place.get("title", "Unknown Business")
+                website = place.get("website", "N/A")
+                
+                if website != "N/A":
+                    # Queue up all website crawlers to execute concurrently
+                    task = extract_emails_from_site(session, website, name, niche)
+                    all_tasks.append(task)
+                    
+        print(f"⚡ Processing {len(all_tasks)} business websites simultaneously in the cloud...")
+        results = await asyncio.gather(*all_tasks)
+        
+        # Clean out empty results where no emails were listed on pages
+        clean_leads = [r for r in results if r is not None]
+        
+        output_file = "playwright_uae_coaches.csv"
+        target_columns = ["Coach Name", "Niche", "Email Address", "Website Link"]
+        
+        if clean_leads:
+            df = pd.DataFrame(clean_leads)
+            df = df.drop_duplicates(subset=["Email Address"])
+            df = df[target_columns]
+            df.to_csv(output_file, index=False, encoding='utf-8')
+            print(f"\n🎉 Extraction Complete! Saved {len(df)} live leads to your repository.")
+        else:
+            df = pd.DataFrame(columns=target_columns)
+            df.to_csv(output_file, index=False, encoding='utf-8')
+            print("\n⚠️ Extraction complete, but no emails were found on pages. File updated.")
 
 if __name__ == "__main__":
-    main()
+    # Initialize the high-speed async processing engine loop
+    asyncio.run(main_async())
