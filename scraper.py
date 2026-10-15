@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import aiohttp
+import requests  # FIXED: Added the missing import globally
 import pandas as pd
 
 NICHES = ["fitness club", "gym", "yoga studio", "crossfit center"]
@@ -19,7 +20,7 @@ async def extract_emails_from_site(session, url, business_name, niche):
     }
     
     try:
-        # High speed async network call to fetch the page content
+        # High-speed async network call to fetch the page content
         async with session.get(url, headers=headers, timeout=12) as response:
             if response.status == 200:
                 html_content = await response.text()
@@ -27,22 +28,24 @@ async def extract_emails_from_site(session, url, business_name, niche):
                 # Regex search matching clean public email records anywhere in the website code
                 emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}', html_content)
                 
-                # Filter to isolate general inquiries and personal addresses, removing image/web design noise
+                # Filter out image fragments or placeholder platforms
                 valid_emails = [
                     e.lower() for e in set(emails) 
                     if not any(ext in e.lower() for ext in ['.png', '.jpg', '.jpeg', '.webp', 'wix', 'domain', 'example'])
                 ]
                 
                 if valid_emails:
-                    print(f"✅ Found Email for {business_name}: {valid_emails[0]}")
+                    # Pick the first unique valid email found on the page
+                    selected_email = valid_emails[0]
+                    print(f"   ✅ Found Email for {business_name}: {selected_email}")
                     return {
                         "Coach Name": business_name,
                         "Niche": niche,
-                        "Email Address": valid_emails[0],
+                        "Email Address": selected_email,
                         "Website Link": url
                     }
     except Exception:
-        # Pass quietly if a website is broken or down so the cloud scanner doesn't halt
+        # Pass quietly if a single website is down so the cloud scanner doesn't stop
         pass
     return None
 
@@ -69,7 +72,6 @@ def fetch_google_maps_businesses(niche):
     return []
 
 async def main_async():
-    import requests
     all_tasks = []
     
     # Establish a shared async browser session for maximum speed
@@ -78,8 +80,6 @@ async def main_async():
         
         for niche in NICHES:
             print(f"🗺️ Querying Maps list for: {niche}")
-            # Import requests strictly inside the helper to fetch maps data
-            import requests
             places = fetch_google_maps_businesses(niche)
             
             for place in places:
@@ -91,11 +91,14 @@ async def main_async():
                     task = extract_emails_from_site(session, website, name, niche)
                     all_tasks.append(task)
                     
-        print(f"⚡ Processing {len(all_tasks)} business websites simultaneously in the cloud...")
-        results = await asyncio.gather(*all_tasks)
-        
-        # Clean out empty results where no emails were listed on pages
-        clean_leads = [r for r in results if r is not None]
+        if all_tasks:
+            print(f"⚡ Processing {len(all_tasks)} business websites simultaneously in the cloud...")
+            results = await asyncio.gather(*all_tasks)
+            # Clean out empty entries where no emails were listed on pages
+            clean_leads = [r for r in results if r is not None]
+        else:
+            print("⚠️ No websites found in the Google Maps search results.")
+            clean_leads = []
         
         output_file = "playwright_uae_coaches.csv"
         target_columns = ["Coach Name", "Niche", "Email Address", "Website Link"]
