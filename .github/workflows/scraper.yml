@@ -1,9 +1,7 @@
 name: Run Cloud Lead Scraper
 
 on:
-  workflow_dispatch: # Allows you to press a button to run it manually
-  schedule:
-    - cron: '0 0 * * 1' # Runs automatically every Monday at midnight
+  workflow_dispatch:
 
 jobs:
   run-scraper:
@@ -18,15 +16,17 @@ jobs:
       with:
         python-version: '3.10'
 
-    # FIXED STEP: Force-installs requests and pandas directly into the runner environment
     - name: Install System Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests pandas
+        pip install playwright pandas
+
+    - name: Install Playwright Chromium & System Dependencies
+      run: |
+        playwright install chromium
+        sudo npx playwright install-deps chromium
 
     - name: Run Cloud Scraper Script
-      env:
-        SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
       run: python scraper.py
 
     - name: Commit and Push CSV Lead Sheet
@@ -35,4 +35,3 @@ jobs:
         git config --global user.email "actions@github.com"
         git add playwright_uae_coaches.csv
         git diff --quiet && git diff --staged --quiet || (git commit -m "Automated update: Refreshed UAE Coach Data Sheet" && git push)
- 
