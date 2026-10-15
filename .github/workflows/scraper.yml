@@ -1,0 +1,48 @@
+# Save this file as: .github/workflows/scraper.yml
+name: Run Playwright Cloud Scraper
+
+on:
+  workflow_dispatch: # Allows you to run this manually via the "Actions" tab button
+  schedule:
+    - cron: '0 0 * * 1' # Automatically runs every Monday at midnight UTC
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Checkout your code from GitHub repositories
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 2. Set up cloud Python system environment
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    # 3. Install required web frameworks and libraries
+    - name: Install System Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install playwright pandas openpyxl
+
+    # 4. Critical: Install Playwright Linux system binaries and browser instances
+    - name: Install Playwright Browsers & Linux Dependencies
+      run: |
+        playwright install chromium
+        # Installs system libraries needed to run Chrome headlessly on Ubuntu OS
+        sudo npx playwright install-deps chromium
+
+    # 5. Run the script dynamically
+    - name: Run Cloud Scraper Script
+      run: python scraper.py
+
+    # 6. Commit the final generated CSV data file back into your GitHub Repository
+    - name: Commit and Push CSV Lead Sheet
+      run: |
+        git config --global user.name "GitHub Action Bot"
+        git config --global user.email "actions@github.com"
+        git add playwright_uae_coaches.csv
+        # Only commit if the file actually changed or has new entries
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Automated update: Refreshed UAE Coach Data Sheet" && git push)
