@@ -1,39 +1,65 @@
+# Save as: .github/workflows/scraper.yml
 name: Run Cloud Lead Scraper
 
 on:
   workflow_dispatch:
+    inputs:
+      category_url:
+        description: "Yello category URL"
+        default: "https://yello.ae/category/beauty-professionals"
+      niche:
+        description: "Niche label for the CSV"
+        default: "Beauty Professional"
+      max_listings:
+        description: "New businesses to process this run"
+        default: "100"
+      max_pages:
+        description: "Listing pages to read"
+        default: "5"
+
+permissions:
+  contents: write
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install System Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install --only-binary=:all: requests pandas
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
 
-    # Re-installs Playwright engine alongside Linux kernel browser hooks
-    - name: Install Playwright & Headless Chromium Binaries
-      run: |
-        pip install playwright
-        playwright install chromium
-        sudo npx playwright install-deps chromium
+      - name: Run scraper
+        env:
+          CATEGORY_URL: ${{ inputs.category_url }}
+          NICHE: ${{ inputs.niche }}
+          MAX_LISTINGS: ${{ inputs.max_listings }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          CONCURRENCY: "4"
+        run: python scraper.py
 
-    - name: Run Evasion Cloud Browser Scraper
-      run: python scraper.py
+      # always() -> even if the run fails halfway, finished rows still get saved
+      - name: Commit and push CSVs
+        if: always()
+        run: |
+          git config user.name "GitHub Action Bot"
+          git config user.email "actions@github.com"
+          git add playwright_uae_beauty.csv playwright_uae_beauty_no_email.csv
+          git diff --staged --quiet || (git commit -m "Automated update: scraped beauty leads" && git pull --rebase && git push)
 
-    - name: Commit and Push CSV Lead Sheet
-      run: |
-        git config --global user.name "GitHub Action Bot"
-        git config --global user.email "actions@github.com"
-        git add playwright_uae_coaches.csv
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Automated update: Refreshed UAE Coach Data Sheet" && git push)
+      - name: Keep a copy as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads
+          path: playwright_uae_beauty*.csv
