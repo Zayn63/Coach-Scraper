@@ -45,6 +45,18 @@ def log(msg):
     print(msg, flush=True)
 
 
+async def safe_close(obj):
+    """Close a page/context without ever hanging the run (this froze your last run)."""
+    try:
+        await asyncio.wait_for(obj.unroute_all(behavior="ignoreErrors"), 5)
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(obj.close(), 10)
+    except Exception:
+        pass
+
+
 # ───────────────────────── files / resume ─────────────────────────
 def init_files():
     for f in (OUT_OK, OUT_NO):
@@ -131,38 +143,76 @@ LISTING_JS = """
 """
 
 
+NEXT_JS = r"""
+(n) => {
+  const as = [...document.querySelectorAll('a[href]')].filter(a => a.href && !a.href.endsWith('#') && !a.href.startsWith('javascript'));
+  const byRel = as.find(a => (a.rel || '').includes('next') || /next/i.test(a.getAttribute('aria-label') || ''));
+  if (byRel) return byRel.href;
+  const byText = as.find(a => /^(next|\u203a|\u00bb|>|>>)$/i.test((a.innerText || '').trim()));
+  if (byText) return byText.href;
+  const byNum = as.find(a => (a.innerText || '').trim() === String(n) && !/\/company\//.test(a.href));
+  return byNum ? byNum.href : null;
+}
+"""
+PAGE_PATTERNS = ["{u}?page={n}", "{u}/page/{n}", "{u}/{n}", "{u}?p={n}", "{u}?pg={n}"]
+
+
+async def scan_listing(page, url, seen, fresh, done):
+    """Open one listing page, add its business links. Returns number of never-seen links (None = failed)."""
+    if not await safe_goto(page, url, 45000):
+        return None
+    await autoscroll(page)
+    links = await page.evaluate(LISTING_JS)
+    if links and not links[0].get("marker"):
+        log("   ⚠️ 'We found N listings' marker not found - using all company links on page")
+    new_here = 0
+    for l in links:
+        m = COMPANY_RE.search(l["href"])
+        if not m:
+            continue
+        u = BASE + m.group(0)
+        if u in seen:
+            continue
+        seen.add(u)
+        new_here += 1
+        if u not in done:
+            fresh.append(u)
+    log(f"   {len(links)} links, {new_here} unseen, {len(fresh)} new targets so far")
+    return new_here
+
+
 async def collect_listing_urls(browser, done):
     ctx = await new_context(browser)
     page = await ctx.new_page()
     seen, fresh = set(), []
-    for page_no in range(1, MAX_PAGES + 1):
-        url = CATEGORY_URL if page_no == 1 else \
-            f"{CATEGORY_URL}{'&' if '?' in CATEGORY_URL else '?'}page={page_no}"
-        log(f"🌐 Listing page {page_no}: {url}")
-        if not await safe_goto(page, url, 45000):
+    base = CATEGORY_URL.rstrip("/")
+    order = PAGE_PATTERNS[:]
+    log(f"🌐 Listing page 1: {CATEGORY_URL}")
+    await scan_listing(page, CATEGORY_URL, seen, fresh, done)
+    for page_no in range(2, MAX_PAGES + 1):
+        if len(fresh) >= MAX_LISTINGS:
             break
-        await autoscroll(page)
-        links = await page.evaluate(LISTING_JS)
-        if links and not links[0].get("marker"):
-            log("   ⚠️ 'We found N listings' marker not found - using all company links on page")
-        new_here = 0
-        for l in links:
-            m = COMPANY_RE.search(l["href"])
-            if not m:
-                continue
-            u = BASE + m.group(0)
-            if u in seen:
-                continue
-            seen.add(u)
-            new_here += 1
-            if u not in done:
-                fresh.append(u)
-        log(f"   {len(links)} links, {new_here} unseen, {len(fresh)} new targets so far")
-        if new_here == 0 or len(fresh) >= MAX_LISTINGS:
-            if new_here == 0 and page_no > 1:
-                log("   page gave nothing new -> pagination ended (or ?page= is not the right format)")
+        candidates = []
+        try:
+            nxt = await page.evaluate(NEXT_JS, page_no)   # real next/numbered link on the page
+        except Exception:
+            nxt = None
+        if nxt:
+            candidates.append(("next", nxt))
+        candidates += [(p, p.format(u=base, n=page_no)) for p in order]   # URL-pattern guesses
+        got = 0
+        for label, cand in candidates:
+            log(f"🌐 Listing page {page_no}: {cand}")
+            got = await scan_listing(page, cand, seen, fresh, done)
+            if got:
+                if label != "next":       # remember the pattern that works
+                    order.remove(label)
+                    order.insert(0, label)
+                break
+        if not got:
+            log("   no more listing pages found")
             break
-    await ctx.close()
+    await safe_close(ctx)
     return fresh[:MAX_LISTINGS], len(seen)
 
 
@@ -294,7 +344,7 @@ async def scrape_site_emails(ctx, site_url):
                 if emails:
                     break
     finally:
-        await page.close()
+        await safe_close(page)
     return emails
 
 
@@ -369,7 +419,7 @@ async def process(browser, url, sem, lock, stats):
         except Exception as e:
             log(f"   ⚠️ skipped {url}: {str(e)[:100]}")
         finally:
-            await ctx.close()
+            await safe_close(ctx)
             await asyncio.sleep(random.uniform(1, 3))
 
 
@@ -386,7 +436,17 @@ async def main():
             raise RuntimeError("No listing links found on the category page - selectors/URL need a check.")
         log(f"📋 {len(urls)} new businesses to process (concurrency {CONCURRENCY})")
         sem = asyncio.Semaphore(CONCURRENCY)
-        await asyncio.gather(*(process(browser, u, sem, lock, stats) for u in urls))
+        no_limit = asyncio.Semaphore(1000)  # process() already takes a semaphore; limiting happens in guarded()
+
+        async def guarded(u):
+            async with sem:
+                try:
+                    # hard stop: one slow/hung business can never freeze the whole run
+                    await asyncio.wait_for(process(browser, u, no_limit, lock, stats), timeout=150)
+                except asyncio.TimeoutError:
+                    log(f"   ⏱️ timed out after 150s, skipped (will retry next run): {u}")
+
+        await asyncio.gather(*(guarded(u) for u in urls))
         await browser.close()
     log(f"\n🎉 Done. With real email: {stats['ok']} | without: {stats['no']}")
 
