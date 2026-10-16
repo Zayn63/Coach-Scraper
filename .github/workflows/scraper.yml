@@ -16,13 +16,19 @@ jobs:
       with:
         python-version: '3.10'
 
-    # FIXED: Added beautifulsoup4 to the pre-compiled binary installation bundle
     - name: Install System Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install --only-binary=:all: requests pandas aiohttp beautifulsoup4
+        pip install --only-binary=:all: requests pandas
 
-    - name: Run Autonomous Cloud Scraper
+    # FIXED: Re-installs Playwright engine and its required Linux dependencies
+    - name: Install Playwright & Headless Chromium Binaries
+      run: |
+        pip install playwright
+        playwright install chromium
+        sudo npx playwright install-deps chromium
+
+    - name: Run Cloud Browser Scraper
       run: python scraper.py
 
     - name: Commit and Push CSV Lead Sheet
