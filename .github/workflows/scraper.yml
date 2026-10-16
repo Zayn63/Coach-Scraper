@@ -21,14 +21,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install --only-binary=:all: requests pandas
 
-    # FIXED: Re-installs Playwright engine and its required Linux dependencies
-    - name: Install Playwright & Headless Chromium Binaries
-      run: |
-        pip install playwright
-        playwright install chromium
-        sudo npx playwright install-deps chromium
-
-    - name: Run Cloud Browser Scraper
+    - name: Run Cloud Database Extractor
+      env:
+        # Securely links your private Apollo API key into the runtime environment
+        APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
       run: python scraper.py
 
     - name: Commit and Push CSV Lead Sheet
