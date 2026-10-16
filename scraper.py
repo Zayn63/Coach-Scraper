@@ -35,6 +35,8 @@ NOT_A_BUSINESS_SITE = ("facebook.", "instagram.", "twitter.", "x.com", "linkedin
 BAD_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js", ".woff", ".woff2", ".ico")
 BAD_PARTS = ("sentry", "wixpress", "example.", "yourdomain", "domain.com", "email.com",
              "schema.org", "w3.org", "@2x", "@3x", "yello.ae")
+FREE_MAIL = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
+             "live.com", "yahoo.co.uk", "hotmail.co.uk", "aol.com", "proton.me", "protonmail.com"}
 GENERIC_LOCALS = ("info", "contact", "hello", "enquiries", "enquiry", "sales",
                   "reservations", "booking", "bookings", "reception", "support")
 
@@ -89,7 +91,7 @@ async def safe_goto(page, url, timeout=30000):
         await page.wait_for_timeout(1500)
         return True
     except Exception as e:
-        log(f"   ⚠️ could not open {url}: {str(e)[:90]}")
+        log(f"   ⚠️ could not open {url}: {(str(e).splitlines() or [''])[0][:90]}")
         return False
 
 
@@ -238,14 +240,33 @@ def host(u):
     return urlparse(u).netloc.lower().replace("www.", "")
 
 
+async def open_site(page, url):
+    """Try the URL, then the www/non-www twin, then http. Skips hosts whose DNS is dead."""
+    p = urlparse(url)
+    h = p.netloc
+    alt = h[4:] if h.startswith("www.") else "www." + h
+    path = p.path or "/"
+    dead = set()
+    for t in (url, f"{p.scheme}://{alt}{path}", f"http://{h}{path}", f"http://{alt}{path}"):
+        th = urlparse(t).netloc
+        if th in dead:
+            continue
+        try:
+            await page.goto(t, wait_until="domcontentloaded", timeout=25000)
+            await page.wait_for_timeout(1500)
+            return True
+        except Exception as e:
+            if "NAME_NOT_RESOLVED" in str(e):
+                dead.add(th)
+    log(f"   ⚠️ website unreachable (dead/expired domain?): {url}")
+    return False
+
+
 async def scrape_site_emails(ctx, site_url):
     page = await ctx.new_page()
     emails = set()
     try:
-        ok = await safe_goto(page, site_url)
-        if not ok and site_url.startswith("https://"):
-            ok = await safe_goto(page, "http://" + site_url[8:])
-        if not ok:
+        if not await open_site(page, site_url):
             return emails
         final_url = page.url
         emails |= await page_emails(page)
@@ -260,11 +281,12 @@ async def scrape_site_emails(ctx, site_url):
             if re.search(r"contact|get-in-touch|reach|about", f"{href} {txt}", re.I) \
                     and host(href) == host(final_url):
                 cands.append(href.split("#")[0])
-        for guess in ("/contact-us/", "/contact/", "/contact-us", "/contact"):
+        for guess in ("/contact-us/", "/contact/", "/contact-us", "/contact",
+                      "/contactus", "/contact.html", "/contact-us.html", "/contact.php"):
             cands.append(urljoin(final_url, guess))
         tried = set()
         for c in cands:
-            if c in tried or len(tried) >= 4:
+            if c in tried or len(tried) >= 6:
                 continue
             tried.add(c)
             if await safe_goto(page, c, 25000):
@@ -276,20 +298,29 @@ async def scrape_site_emails(ctx, site_url):
     return emails
 
 
-def rank_emails(emails, site):
+def split_emails(emails, site):
+    """good  = same domain as the business site, or a free-mail address (gmail etc.)
+       other = unrelated domains (theme placeholders like info@beauty.com, agencies) -> manual check"""
     norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
-    site_n = norm(host(site)) if site else ""
+    b = norm(host(site).split(".")[0]) if site else ""
 
-    def score(e):
+    def same_site(dom):
+        a = norm(dom.split(".")[0])
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        short, long_ = sorted((a, b), key=len)
+        return len(short) >= 5 and short in long_ and len(short) / len(long_) >= 0.7
+
+    def key(e):
         local, dom = e.split("@", 1)
-        s = 0
-        if site_n and norm(dom.split(".")[0]) in site_n:
-            s -= 10                       # email domain matches the business site
-        if local in GENERIC_LOCALS:
-            s -= 3
-        return s
+        return (0 if same_site(dom) else 1, 0 if local in GENERIC_LOCALS else 1, e)
 
-    return sorted(emails, key=score)
+    good = sorted([e for e in emails
+                   if same_site(e.split("@", 1)[1]) or e.split("@", 1)[1] in FREE_MAIL], key=key)
+    other = sorted(e for e in emails if e not in good)
+    return good, other
 
 
 # ───────────────────────── one target, start to finish ─────────────────────────
@@ -304,6 +335,7 @@ async def process(browser, url, sem, lock, stats):
                 name = (await page.inner_text("h1")).strip()
             except Exception:
                 name = (await page.title()).split(" - ")[0].strip()
+            name = re.sub(r"\s+[-–]\s+(?:[\w .]+,\s*)?UAE\s*$", "", name).strip()  # "X - Dubai, UAE" -> "X"
             phone = ""
             try:
                 tel = await page.query_selector("a[href^='tel:']")
@@ -313,24 +345,27 @@ async def process(browser, url, sem, lock, stats):
 
             log(f"📂 {name}")
             website = await find_website(page, ctx)
-            emails = []
+            good, other = [], []
             if website:
-                log(f"   🔗 website: {website}")
-                emails = rank_emails(await scrape_site_emails(ctx, website), website)
+                log(f"   [{name}] 🔗 {website}")
+                good, other = split_emails(await scrape_site_emails(ctx, website), website)
             else:
-                log("   🔗 no personal website listed")
+                log(f"   [{name}] 🔗 no personal website listed")
 
             row = {"Business Name": name, "Niche": NICHE,
-                   "Email Address": emails[0] if emails else "",
-                   "Other Emails": "; ".join(emails[1:4]),
+                   "Email Address": good[0] if good else "",
+                   "Other Emails": "; ".join((good[1:3] + other)[:4]),
                    "Website": website or "", "Phone": phone, "Yello URL": url}
-            await save_row(row, bool(emails), lock)
-            if emails:
+            await save_row(row, bool(good), lock)
+            if good:
                 stats["ok"] += 1
-                log(f"   ✅ {name} -> {emails[0]}")
+                log(f"   ✅ [{name}] -> {good[0]}")
+            elif other:
+                stats["no"] += 1
+                log(f"   ❓ [{name}] only unrelated-domain email(s) {other[:2]} -> no-email file, check manually")
             else:
                 stats["no"] += 1
-                log(f"   — no email found for {name}")
+                log(f"   — [{name}] no email found")
         except Exception as e:
             log(f"   ⚠️ skipped {url}: {str(e)[:100]}")
         finally:
