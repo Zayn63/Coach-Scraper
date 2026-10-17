@@ -20,6 +20,8 @@ CONCURRENCY = int(os.getenv("CONCURRENCY") or 4)      # businesses processed in 
 
 OUT_OK = "playwright_uae_beauty.csv"                  # rows WITH a real email
 OUT_NO = "playwright_uae_beauty_no_email.csv"         # rows without (kept so we never redo them)
+OUT_DUP = "playwright_uae_beauty_duplicates.csv"      # salons we already had (kept so we never redo them)
+EXCLUDE_FILES = ["exclude.csv"]                       # optional: any older list you never want scraped again
 FIELDS = ["Business Name", "Niche", "Email Address", "Other Emails", "Website", "Phone", "Yello URL"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -59,26 +61,46 @@ async def safe_close(obj):
 
 # ───────────────────────── files / resume ─────────────────────────
 def init_files():
-    for f in (OUT_OK, OUT_NO):
+    for f in (OUT_OK, OUT_NO, OUT_DUP):
         if not os.path.exists(f):
             with open(f, "w", newline="", encoding="utf-8") as fh:
                 csv.DictWriter(fh, FIELDS).writeheader()
 
 
-def load_done():
-    done = set()
-    for f in (OUT_OK, OUT_NO):
-        if os.path.exists(f):
-            with open(f, newline="", encoding="utf-8") as fh:
-                for row in csv.DictReader(fh):
-                    if row.get("Yello URL"):
-                        done.add(row["Yello URL"])
-    return done
+def norm_name(n):
+    return re.sub(r"[^a-z0-9]", "", n.lower())
 
 
-async def save_row(row, has_email, lock):
+KNOWN = {"urls": set(), "names": set(), "emails": set()}
+
+
+def load_known():
+    """Everything we already have: Yello URLs, salon names and emails from our own CSVs
+    plus any optional exclude.csv (any column with 'name' or 'email' in its header is used)."""
+    k = {"urls": set(), "names": set(), "emails": set()}
+    for f in [OUT_OK, OUT_NO, OUT_DUP] + EXCLUDE_FILES:
+        if not os.path.exists(f):
+            continue
+        with open(f, newline="", encoding="utf-8-sig") as fh:
+            for row in csv.DictReader(fh):
+                for col, val in row.items():
+                    if not col or not val:
+                        continue
+                    c = col.lower()
+                    if col == "Yello URL":
+                        k["urls"].add(val.strip())
+                    elif "name" in c:
+                        k["names"].add(norm_name(val))
+                    elif "email" in c:
+                        for e in re.split(r"[;,\s]+", val):
+                            if "@" in e:
+                                k["emails"].add(e.lower())
+    return k
+
+
+async def save_row(row, target, lock):
     async with lock:  # written immediately, so a crash never loses finished work
-        with open(OUT_OK if has_email else OUT_NO, "a", newline="", encoding="utf-8") as fh:
+        with open(target, "a", newline="", encoding="utf-8") as fh:
             csv.DictWriter(fh, FIELDS).writerow(row)
 
 
@@ -386,6 +408,13 @@ async def process(browser, url, sem, lock, stats):
             except Exception:
                 name = (await page.title()).split(" - ")[0].strip()
             name = re.sub(r"\s+[-–]\s+(?:[\w .]+,\s*)?UAE\s*$", "", name).strip()  # "X - Dubai, UAE" -> "X"
+            nkey = norm_name(name)
+            if nkey in KNOWN["names"]:      # already have this salon -> skip before visiting its website
+                await save_row({"Business Name": name, "Niche": NICHE, "Yello URL": url}, OUT_DUP, lock)
+                stats["dup"] += 1
+                log(f"   ⏭️ [{name}] already in your list - skipped")
+                return
+            KNOWN["names"].add(nkey)
             phone = ""
             try:
                 tel = await page.query_selector("a[href^='tel:']")
@@ -406,16 +435,22 @@ async def process(browser, url, sem, lock, stats):
                    "Email Address": good[0] if good else "",
                    "Other Emails": "; ".join((good[1:3] + other)[:4]),
                    "Website": website or "", "Phone": phone, "Yello URL": url}
-            await save_row(row, bool(good), lock)
-            if good:
+            if good and good[0].lower() in KNOWN["emails"]:
+                await save_row(row, OUT_DUP, lock)
+                stats["dup"] += 1
+                log(f"   ⏭️ [{name}] email {good[0]} already in your list - saved as duplicate")
+            elif good:
+                KNOWN["emails"].update(e.lower() for e in good)
+                await save_row(row, OUT_OK, lock)
                 stats["ok"] += 1
                 log(f"   ✅ [{name}] -> {good[0]}")
-            elif other:
-                stats["no"] += 1
-                log(f"   ❓ [{name}] only unrelated-domain email(s) {other[:2]} -> no-email file, check manually")
             else:
+                await save_row(row, OUT_NO, lock)
                 stats["no"] += 1
-                log(f"   — [{name}] no email found")
+                if other:
+                    log(f"   ❓ [{name}] only unrelated-domain email(s) {other[:2]} -> no-email file, check manually")
+                else:
+                    log(f"   — [{name}] no email found")
         except Exception as e:
             log(f"   ⚠️ skipped {url}: {str(e)[:100]}")
         finally:
@@ -425,10 +460,11 @@ async def process(browser, url, sem, lock, stats):
 
 async def main():
     init_files()
-    done = load_done()
-    log(f"🚀 Start | category: {CATEGORY_URL} | already processed: {len(done)}")
+    KNOWN.update(load_known())
+    done = KNOWN["urls"]
+    log(f"🚀 Start | category: {CATEGORY_URL} | already processed: {len(done)} | known names: {len(KNOWN['names'])} | known emails: {len(KNOWN['emails'])}")
     lock = asyncio.Lock()
-    stats = {"ok": 0, "no": 0}
+    stats = {"ok": 0, "no": 0, "dup": 0}
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         urls, total_seen = await collect_listing_urls(browser, done)
@@ -448,7 +484,7 @@ async def main():
 
         await asyncio.gather(*(guarded(u) for u in urls))
         await browser.close()
-    log(f"\n🎉 Done. With real email: {stats['ok']} | without: {stats['no']}")
+    log(f"\n🎉 Done. With real email: {stats['ok']} | without: {stats['no']} | duplicates skipped: {stats['dup']}")
 
 
 if __name__ == "__main__":
