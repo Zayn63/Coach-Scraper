@@ -14,8 +14,11 @@ on:
         description: "New businesses to process this run"
         default: "100"
       max_pages:
-        description: "Listing pages to read"
+        description: "Listing pages to read (about 20 businesses per page)"
         default: "5"
+      concurrency:
+        description: "Businesses processed at the same time (6-8 is safe)"
+        default: "6"
 
 permissions:
   contents: write
@@ -23,7 +26,7 @@ permissions:
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
 
     steps:
       - name: Checkout Code
@@ -45,7 +48,7 @@ jobs:
           NICHE: ${{ inputs.niche }}
           MAX_LISTINGS: ${{ inputs.max_listings }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          CONCURRENCY: "4"
+          CONCURRENCY: ${{ inputs.concurrency }}
         run: python scraper.py
 
       # always() -> even if the run fails halfway, finished rows still get saved
@@ -54,7 +57,7 @@ jobs:
         run: |
           git config user.name "GitHub Action Bot"
           git config user.email "actions@github.com"
-          git add playwright_uae_beauty.csv playwright_uae_beauty_no_email.csv
+          git add playwright_uae_beauty.csv playwright_uae_beauty_no_email.csv playwright_uae_beauty_duplicates.csv
           git diff --staged --quiet || (git commit -m "Automated update: scraped beauty leads" && git pull --rebase && git push)
 
       - name: Keep a copy as artifact
