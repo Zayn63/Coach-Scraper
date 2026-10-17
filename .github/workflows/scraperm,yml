@@ -1,0 +1,68 @@
+# Save as: .github/workflows/scraper_massage.yml
+name: Run Massage Spa Physio Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      category_url:
+        description: "Massage Therapists link from yello.ae (delete the placeholder and paste it)"
+        default: "PASTE_MASSAGE_LINK_HERE"
+      niche:
+        description: "Niche label (for several URLs: one label per URL, comma-separated, same order - or leave a single word to auto-name)"
+        default: "Massage / Spa / Physio"
+      max_listings:
+        description: "New businesses to process this run"
+        default: "200"
+      max_pages:
+        description: "Listing pages to read (about 20 businesses per page)"
+        default: "15"
+      concurrency:
+        description: "Businesses processed at the same time (6-8 is safe)"
+        default: "6"
+
+permissions:
+  contents: write
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run scraper
+        env:
+          CATEGORY_URL: ${{ inputs.category_url }}
+          NICHE: ${{ inputs.niche }}
+          MAX_LISTINGS: ${{ inputs.max_listings }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+        run: python scraper_massage.py
+
+      # always() -> even if the run fails halfway, finished rows still get saved
+      - name: Commit and push CSVs
+        if: always()
+        run: |
+          git config user.name "GitHub Action Bot"
+          git config user.email "actions@github.com"
+          git add playwright_uae_massage.csv playwright_uae_massage_no_email.csv playwright_uae_massage_duplicates.csv
+          git diff --staged --quiet || (git commit -m "Automated update: scraped massage leads" && git pull --rebase && git push)
+
+      - name: Keep a copy as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads-massage
+          path: playwright_uae_massage*.csv
