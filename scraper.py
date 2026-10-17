@@ -12,8 +12,8 @@ from urllib.parse import unquote, urljoin, urlparse
 from playwright.async_api import async_playwright
 
 BASE = "https://yello.ae"
-CATEGORY_URL = os.getenv("CATEGORY_URL") or "https://yello.ae/category/beauty-professionals"
-NICHE = os.getenv("NICHE") or "Beauty Professional"
+CATEGORY_URL = os.getenv("CATEGORY_URL") or "https://www.yello.ae/category/massage-therapists"
+NICHE = os.getenv("NICHE") or "Massage Therapists"
 MAX_PAGES = int(os.getenv("MAX_PAGES") or 5)          # listing pages to read
 MAX_LISTINGS = int(os.getenv("MAX_LISTINGS") or 100)  # new businesses per run
 CONCURRENCY = int(os.getenv("CONCURRENCY") or 4)      # businesses processed in parallel
