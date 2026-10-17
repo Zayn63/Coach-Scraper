@@ -3,7 +3,7 @@ name: Run Massage Spa Physio Scraper
 
 on:
   workflow_dispatch:
-    inputs:
+    inputs:   
       category_url:
         description: "Massage Therapists link from yello.ae (delete the placeholder and paste it)"
         default: "PASTE_MASSAGE_LINK_HERE"
@@ -49,7 +49,7 @@ jobs:
           MAX_LISTINGS: ${{ inputs.max_listings }}
           MAX_PAGES: ${{ inputs.max_pages }}
           CONCURRENCY: ${{ inputs.concurrency }}
-        run: python scraper_massage.py
+        run: python scrapermassage.py
 
       # always() -> even if the run fails halfway, finished rows still get saved
       - name: Commit and push CSVs
